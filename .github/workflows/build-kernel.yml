@@ -202,6 +202,14 @@ jobs:
         if: always()
         run: bash .ci/60-flashable.sh
 
+      # kleaf emits vendor_dlkm as ext4, but LineageOS flashes an EROFS image
+      # (BOARD_VENDOR_DLKMIMAGE_FILE_SYSTEM_TYPE := erofs). Rebuild it from the
+      # dist modules with the parameters read back from a real device image, so
+      # the artifact matches what the phone actually mounts.
+      - name: Build EROFS vendor_dlkm image
+        if: always()
+        run: bash .ci/70-vendor-dlkm-erofs.sh
+
       - name: Summarise artifacts
         if: always()
         run: |
