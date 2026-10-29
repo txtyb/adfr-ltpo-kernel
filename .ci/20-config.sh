@@ -42,17 +42,30 @@ require_file "$FRAGMENT"
 # 1. the kernel that actually boots
 # --------------------------------------------------------------------------
 require_file "$GKI_DEFCONFIG"
-log "Patching the GKI defconfig (this is the kernel that boots)"
-set +e
-python3 "$REPO_ROOT/.ci/patch-defconfig.py" "$GKI_DEFCONFIG" "$FRAGMENT"
-rc=$?
-set -e
-case "$rc" in
-    0) log "gki_defconfig updated" ;;
-    2) log "gki_defconfig already up to date" ;;
-    *) die "patch-defconfig.py failed (exit $rc)" ;;
-esac
-grep -n 'CONFIG_TMPFS' "$GKI_DEFCONFIG" || warn "no CONFIG_TMPFS* line in gki_defconfig"
+
+# An empty fragment is a legitimate state: this build wants the kernel config to
+# stay exactly as the ROM ships it. patch-defconfig.py exits 1 (not 2) when the
+# fragment has no CONFIG_ lines at all, so detect that here instead of dying.
+HAVE_EXTRA=0
+if grep -qE '^CONFIG_[A-Za-z0-9_]+=' "$FRAGMENT"; then
+    HAVE_EXTRA=1
+else
+    log "$(basename "$FRAGMENT") requests no CONFIG_ options; leaving the kernel config untouched"
+fi
+
+if [ "$HAVE_EXTRA" = 1 ]; then
+    log "Patching the GKI defconfig (this is the kernel that boots)"
+    set +e
+    python3 "$REPO_ROOT/.ci/patch-defconfig.py" "$GKI_DEFCONFIG" "$FRAGMENT"
+    rc=$?
+    set -e
+    case "$rc" in
+        0) log "gki_defconfig updated" ;;
+        2) log "gki_defconfig already up to date" ;;
+        *) die "patch-defconfig.py failed (exit $rc)" ;;
+    esac
+    grep -n 'CONFIG_TMPFS' "$GKI_DEFCONFIG" || warn "no CONFIG_TMPFS* line in gki_defconfig"
+fi
 
 # Match the ROM's kernel release string when asked. See lib.sh for why: the
 # release is part of every module's vermagic.
@@ -76,17 +89,21 @@ fi
 # 2. the vendor DDK / DTB configuration
 # --------------------------------------------------------------------------
 require_file "$SOC_DEFCONFIG"
-log "Merging $(basename "$FRAGMENT") into configs/$DEFCONFIG_DICT (modules + DTBs)"
-set +e
-python3 "$REPO_ROOT/.ci/apply-config.py" "$SOC_DEFCONFIG" "$FRAGMENT"
-rc=$?
-set -e
-case "$rc" in
-    0) log "config dict updated" ;;
-    2) log "config dict already up to date" ;;
-    *) die "apply-config.py failed (exit $rc)" ;;
-esac
-grep -n '"CONFIG_TMPFS' "$SOC_DEFCONFIG" || warn "no CONFIG_TMPFS* entry found"
+if [ "$HAVE_EXTRA" = 1 ]; then
+    log "Merging $(basename "$FRAGMENT") into configs/$DEFCONFIG_DICT (modules + DTBs)"
+    set +e
+    python3 "$REPO_ROOT/.ci/apply-config.py" "$SOC_DEFCONFIG" "$FRAGMENT"
+    rc=$?
+    set -e
+    case "$rc" in
+        0) log "config dict updated" ;;
+        2) log "config dict already up to date" ;;
+        *) die "apply-config.py failed (exit $rc)" ;;
+    esac
+    grep -n '"CONFIG_TMPFS' "$SOC_DEFCONFIG" || warn "no CONFIG_TMPFS* entry found"
+else
+    log "skipping the vendor defconfig dict merge for the same reason"
+fi
 
 # --------------------------------------------------------------------------
 # 3. record exactly what changed
