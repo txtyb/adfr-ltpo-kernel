@@ -1,0 +1,41 @@
+From 0585df27dad631ff1d692adcadfcef2ee59cc565 Mon Sep 17 00:00:00 2001
+From: ci <ci@localhost>
+Date: Thu, 15 Oct 2026 22:00:04 +0800
+Subject: [PATCH] canoe: enable CONFIG_TMPFS_XATTR
+
+CONFIG_TMPFS_XATTR is set nowhere in the 6.12 vendor configuration:
+gki_defconfig only enables CONFIG_TMPFS, and fs/Kconfig declares
+
+    config TMPFS_XATTR
+        bool "Tmpfs extended attributes"
+        depends on TMPFS
+        default n
+
+so tmpfs ends up without xattr handlers. Android user space, and anything that
+keeps metadata on tmpfs (selinux labels on /dev, overlay-on-tmpfs setups), needs
+them.
+
+The Qualcomm kleaf defconfig dict is the supported place to ask for it:
+kleaf-scripts/defconfig_fragment.bzl turns the dict into a defconfig fragment
+merged after gki_defconfig, and android_build.bzl passes canoe_perf_config as
+the implicit fragment for the consolidate variant too, so this one entry covers
+both variants.
+---
+ configs/canoe_perf.bzl | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/configs/canoe_perf.bzl b/configs/canoe_perf.bzl
+index c733611..3b608ab 100644
+--- a/configs/canoe_perf.bzl
++++ b/configs/canoe_perf.bzl
+@@ -422,6 +422,7 @@ canoe_perf_config = {
+     "CONFIG_STM_SOURCE_CONSOLE": "m",
+     "CONFIG_STM_SOURCE_FTRACE": "m",
+     "CONFIG_STM_SOURCE_HEARTBEAT": "m",
++    "CONFIG_TMPFS_XATTR": "y",
+     "CONFIG_UCSI_QTI_GLINK": "m",
+     "CONFIG_UIO_MSM_SHAREDMEM": "m",
+     "CONFIG_USB_CONFIGFS_F_CCID": "m",
+-- 
+2.45.1.windows.1
+
