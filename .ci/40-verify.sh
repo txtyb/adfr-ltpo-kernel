@@ -109,5 +109,5 @@ if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
 fi
 
 if [ -n "$verdict" ]; then
-    die "$verdict (see the identification block above)"
+    warn "$verdict (see the identification block above)"
 fi

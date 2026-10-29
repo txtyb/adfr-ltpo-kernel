@@ -10,7 +10,9 @@ name: OnePlus 15 OSS kernel
 #
 # built with kleaf exactly the way LineageOS does it
 # (vendor/lineage/build/tasks/kernel.mk, TARGET_KERNEL_PLATFORM_TARGET:=canoe_perf),
-# plus CONFIG_TMPFS_XATTR=y from .ci/extra.config.
+# with no extra config from .ci/extra.config (it is intentionally empty: any
+# CONFIG_ change moves the GKI symbol CRCs and stops the ROM's own vendor
+# modules from loading).
 #
 # A cold run downloads ~15 GB and then compiles for a while, so this workflow is
 # manual-only by default: trigger it from the Actions tab. The one exception is
@@ -156,8 +158,8 @@ jobs:
       - name: Sync kernel sources
         run: bash .ci/10-sync.sh
 
-      # CONFIG_TMPFS_XATTR=y (and anything else in .ci/extra.config) is merged
-      # into the SoC tree's kleaf defconfig dict here.
+      # Anything in .ci/extra.config is merged into the SoC tree's kleaf
+      # defconfig dict here. The file is currently empty on purpose.
       - name: Apply kernel config
         run: bash .ci/20-config.sh
 
@@ -183,9 +185,9 @@ jobs:
       - name: Build kernel
         run: bash .ci/30-build.sh
 
-      # Reads the config back out of the built Image, so a fragment that never
-      # reached Kbuild fails the job instead of shipping quietly.
-      - name: Verify CONFIG_TMPFS_XATTR=y
+      # Reports the config that actually ended up in the built Image. With no
+      # extra config requested this is informational only.
+      - name: Verify kernel config
         run: bash .ci/40-verify.sh
 
       # These three run even when the config check fails: a failed check is
