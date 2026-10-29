@@ -1,17 +1,42 @@
 From: txtyb <txtybbill@163.com>
-Subject: [PATCH] display: oplus_adfr: brightness-based SA floor driven by QSync
+Subject: [PATCH] display: oplus_adfr: kernel-side LTPO floor and auto mode
 
-Add a backlight-dependent SA min-fps table and derive the ADFR floor
-from the QSync state requested by SDE: when qsync is off the floor is the
-mode refresh rate, when it is on the floor comes from the table (falling
-back to qsync_min_fps). Recompute it after every timing switch.
+ display: oplus_adfr: kernel-side LTPO without the vendor display service
 
-Port of the Project Infinity-X implementation.
+ Port the Project Infinity-X ADFR floor handling and add a kernel-side
+ replacement for the OnePlus userspace service that LineageOS does not ship.
+
+ * oplus_adfr_get_sa_floor(): pick the SA min fps floor from the panel
+   backlight table (oplus,adfr-sa-min-fps-bl-table), falling back to
+   qsync_min_fps.
+ * oplus_adfr_sa_floor_update(): on stock ROMs this follows the QSync state
+   the composer reports. Keep it for completeness, but it stays inert here:
+   sde_connector drops CONNECTOR_PROP_QSYNC_MODE whenever the panel uses OA
+   fixed TE, which is the case for this panel.
+ * oplus_adfr_auto_floor_update(): derive the floor from the backlight table
+   (or adfr_auto_min_fps) and keep auto_mode armed, rebuilding the state after
+   every timing switch. The panel then manages idle transitions by itself.
+ * adfr_auto_floor / adfr_auto_min_fps module parameters expose that at
+   /sys/module/msm_drm/parameters/. The floor feature defaults to off, so the
+   patch is a no-op until it is armed.
+
+ Also export oplus_adfr_get_params() and add the qsync_mode plus backlight
+ table members to struct oplus_adfr_params.
 ---
 
 --- a/qcom/opensource/display-drivers/oplus/SM8850/oplus_adfr.c
 +++ b/qcom/opensource/display-drivers/oplus/SM8850/oplus_adfr.c
-@@ -133,7 +133,7 @@
+@@ -8,6 +8,9 @@
+ ***************************************************************/
+ 
+ #include <linux/pinctrl/consumer.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/kstrtox.h>
+ #include "oplus_adfr.h"
+ #include "oplus_display_device_ioctl.h"
+ #include "oplus_display_pwm.h"
+@@ -133,7 +136,7 @@
  	return 0;
  }
  
@@ -20,7 +45,7 @@ Port of the Project Infinity-X implementation.
  {
  	struct dsi_panel *panel = dsi_panel;
  
-@@ -158,6 +158,7 @@
+@@ -158,6 +161,7 @@
  int oplus_adfr_init(void *dsi_panel)
  {
  	int rc = 0;
@@ -28,7 +53,7 @@ Port of the Project Infinity-X implementation.
  	unsigned int value = 0;
  	struct dsi_panel *panel = dsi_panel;
  	struct dsi_parser_utils *utils = NULL;
-@@ -228,6 +229,21 @@
+@@ -228,6 +232,21 @@
  			p_oplus_adfr_params->osync_mode_timer.function = oplus_adfr_osync_mode_timer_handler;
  		}
  	}
@@ -50,7 +75,7 @@ Port of the Project Infinity-X implementation.
  
  	/* oplus,adfr-oa-use-fixed-te */
  	p_oplus_adfr_params->oa_use_fixed_te = utils->read_bool(utils->data, "oplus,adfr-oa-use-fixed-te");
-@@ -1736,6 +1752,13 @@
+@@ -1736,6 +1755,13 @@
  
  	OPLUS_ADFR_TRACE_BEGIN("oplus_adfr_sa_handle");
  
@@ -64,7 +89,7 @@ Port of the Project Infinity-X implementation.
  	if (p_oplus_adfr_params->auto_mode_updated) {
  		rc = oplus_adfr_auto_mode_update(display, p_oplus_adfr_params->auto_mode);
  		if (rc) {
-@@ -1792,6 +1815,58 @@
+@@ -1792,6 +1818,175 @@
  	return rc;
  }
  
@@ -120,18 +145,136 @@ Port of the Project Infinity-X implementation.
 +	return 0;
 +}
 +
++
++/*
++ * ---------------------------------------------------------------------------
++ * Kernel-side LTPO: keep ADFR auto mode armed with a low SA min-fps floor.
++ *
++ * On OxygenOS this state is driven from userspace. oplus_adfr_init (the
++ * vendor display service) sends the OPLUS auto-ADFR control word
++ * 0x5cc18181 through the QTI composer; display-core turns it into a write of
++ * the connector's "qsync_min_fps" DRM property, and this driver decodes it as
++ * auto_mode = OPLUS_ADFR_AUTO_ON with an SA min fps of 1.
++ *
++ * LineageOS ships neither the service nor the HAL patches. The generic QSync
++ * property its composer does send is dropped by sde_connector whenever the
++ * panel runs OA fixed TE, so auto mode is never enabled and the panel stays
++ * at the mode refresh rate for good.
++ *
++ * Instead of waiting for a hint that never arrives, derive the floor from the
++ * panel backlight table (oplus,adfr-sa-min-fps-bl-table) and keep auto mode
++ * armed across timing switches. From then on the panel hardware handles the
++ * idle transitions itself: full rate while frames arrive, floor when they do
++ * not. No userspace daemon and no polling loop are involved.
++ *
++ * Runtime control:
++ *   /sys/module/msm_drm/parameters/adfr_auto_floor      1 = arm, 0 = off
++ *   /sys/module/msm_drm/parameters/adfr_auto_min_fps    fixed floor, 0 = table
++ * ---------------------------------------------------------------------------
++ */
++static unsigned int adfr_auto_floor;
++static unsigned int adfr_auto_min_fps;
++
++static int oplus_adfr_auto_floor_update(void *dsi_panel)
++{
++	struct dsi_panel *panel = dsi_panel;
++	struct dsi_display_mode_priv_info *priv_info = NULL;
++	struct oplus_adfr_params *p_oplus_adfr_params = NULL;
++	unsigned int refresh_rate = 120;
++	unsigned int min_fps = 0;
++	unsigned int table_count, table_first, table_last;
++
++	if (!adfr_auto_floor || !panel || !panel->cur_mode || !panel->cur_mode->priv_info)
++		return 0;
++
++	p_oplus_adfr_params = oplus_adfr_get_params(panel);
++	if (!p_oplus_adfr_params || !oplus_adfr_is_supported(p_oplus_adfr_params))
++		return 0;
++
++	priv_info = panel->cur_mode->priv_info;
++	table_count = priv_info->oplus_adfr_min_fps_mapping_table_count;
++	if (!table_count)
++		return 0;
++
++	refresh_rate = panel->cur_mode->timing.refresh_rate;
++	table_first = priv_info->oplus_adfr_min_fps_mapping_table[0];
++	table_last = priv_info->oplus_adfr_min_fps_mapping_table[table_count - 1];
++
++	if (adfr_auto_min_fps)
++		min_fps = adfr_auto_min_fps;
++	else
++		min_fps = oplus_adfr_get_sa_floor(panel);
++
++	if (!min_fps || min_fps > refresh_rate)
++		min_fps = refresh_rate;
++	if (min_fps < table_last)
++		min_fps = table_last;
++	if (min_fps > table_first)
++		min_fps = table_first;
++
++	if (p_oplus_adfr_params->auto_mode != OPLUS_ADFR_AUTO_ON) {
++		p_oplus_adfr_params->auto_mode = OPLUS_ADFR_AUTO_ON;
++		p_oplus_adfr_params->auto_mode_updated = true;
++		p_oplus_adfr_params->sa_min_fps_updated = true;
++	}
++
++	if (min_fps != p_oplus_adfr_params->sa_min_fps) {
++		p_oplus_adfr_params->sa_min_fps = min_fps;
++		p_oplus_adfr_params->sa_min_fps_updated = true;
++	}
++
++	ADFR_INFO("auto floor: refresh_rate:%u auto_min_fps:%u, auto_mode:%u\n",
++			refresh_rate, min_fps, p_oplus_adfr_params->auto_mode);
++
++	return 0;
++}
++
++static int oplus_adfr_auto_floor_set(const char *val, const struct kernel_param *kp)
++{
++	struct dsi_display *display = NULL;
++	unsigned int floor = 0;
++	int rc = 0;
++
++	rc = kstrtouint(val, 0, &floor);
++	if (rc)
++		return rc;
++
++	adfr_auto_floor = floor;
++
++	/* apply right away instead of waiting for the next timing switch */
++	display = oplus_display_get_current_display();
++	if (display && display->panel)
++		oplus_adfr_auto_floor_update(display->panel);
++
++	ADFR_INFO("adfr_auto_floor:%u\n", adfr_auto_floor);
++
++	return 0;
++}
++
++static const struct kernel_param_ops oplus_adfr_auto_floor_ops = {
++	.set = oplus_adfr_auto_floor_set,
++	.get = param_get_uint,
++};
++
++module_param_cb(adfr_auto_floor, &oplus_adfr_auto_floor_ops, &adfr_auto_floor, 0644);
++MODULE_PARM_DESC(adfr_auto_floor, "Keep ADFR in auto mode with a low SA min-fps floor (kernel-side LTPO)");
++
++module_param(adfr_auto_min_fps, uint, 0644);
++MODULE_PARM_DESC(adfr_auto_min_fps, "Fixed SA min-fps floor used when adfr_auto_floor is armed (0 = backlight table)");
++
  /* reset adfr status as panel power on or timing switch */
  int oplus_adfr_status_reset(void *dsi_panel)
  {
-@@ -1840,6 +1915,7 @@
+@@ -1840,6 +2035,8 @@
  
  		p_oplus_adfr_params->sa_min_fps = refresh_rate;
  		p_oplus_adfr_params->sa_min_fps_updated = false;
 +		oplus_adfr_sa_floor_update(panel, p_oplus_adfr_params->qsync_mode);
++	oplus_adfr_auto_floor_update(panel);
  		if (oplus_adfr_high_precision_sa_mode_is_enabled(p_oplus_adfr_params)) {
  			p_oplus_adfr_params->sa_high_precision_fps_updated = false;
  		}
-@@ -2802,13 +2878,19 @@
+@@ -2802,13 +2999,19 @@
  		ADFR_DEBUG("adfr is not supported\n");
  		return 0;
  	}

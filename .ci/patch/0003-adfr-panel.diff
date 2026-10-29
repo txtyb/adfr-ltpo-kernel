@@ -1,11 +1,19 @@
 From: txtyb <txtybbill@163.com>
-Subject: [PATCH] arm64: dts: oplus: AD296: restore ADFR tables and add SA floor table
+Subject: [PATCH] arm64: dts: oplus: AD296: ADFR tables and TE measurement
 
-Add qsync AVR step fps to every timing, restore the ADFR min-fps mapping
-tables and command sequences for the 144Hz and 165Hz timings, and add the
-oplus,adfr-sa-min-fps-bl-table used by the driver to pick the SA floor.
+ arm64: dts: oplus: AD296 panel: ADFR tables, SA floor table, TE measurement
 
-Port of the Project Infinity-X implementation.
+ * Add qcom,dsi-qsync-mode-avr-step-fps to every timing so the DSI driver knows
+   the step size each timing supports.
+ * Restore the oplus,adfr-min-fps-mapping-table entries and command sequences
+   for the 144 Hz and 165 Hz timings (LineageOS only ships three of them).
+ * Add oplus,adfr-sa-min-fps-bl-table so the driver can pick the SA floor from
+   the current backlight level.
+ * Drop oplus,adfr-idle-off-min-fps and lower qsync min refresh rate to 1 Hz to
+   match the stock panel configuration.
+ * Clear BIT14 (software marker) in oplus,adfr-config so the driver registers
+   the TE GPIO interrupt at probe time. Without it test_te never measures and
+   the real panel refresh rate cannot be read.
 ---
 
 --- a/qcom/display/oplus/panel/dsi-panel-AD296-P-3-A0020-dsc-cmd.dtsi
@@ -58,7 +66,12 @@ Port of the Project Infinity-X implementation.
  				qcom,mdss-dsi-panel-clockrate = <1112600000>;
  				qcom,mdss-dsi-panel-width = <1272>;
  				qcom,mdss-dsi-panel-height = <2772>;
-@@ -3154,7 +3160,9 @@
+@@ -3150,11 +3156,13 @@
+ 	oplus,ofp-need-to-wait-data-before-aod-on;
+ 	oplus,ofp-aod-off-frame-cost = <1>;
+ 	/* adfr config */
+-	oplus,adfr-config = <0x6e41>;  // 0b0110'1110'0100'0001
++	oplus,adfr-config = <0x2e41>;  // 0b0010'1110'0100'0001 -- BIT14(software marker) off so the TE GPIO irq is registered for real frame rate measurement
  	oplus,adfr-test-te-gpio = <&tlmm 85 0>;
  	/* just for qsync enable*/
  	qcom,qsync-enable;
