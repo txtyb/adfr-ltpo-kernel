@@ -138,13 +138,28 @@ fi
 
 # ---------------------------------------------------------------------------
 # 4. SELinux labels: everything under vendor_dlkm is vendor_file
+#
+# The GitHub runner kernel has SELinux compiled in but not enabled, so the
+# security.selinux xattr handler is absent and setfattr cannot write the label
+# (it silently produces an image with Xattr size 0, which the device then
+# cannot label correctly). Build the label into the image instead: mkfs.erofs
+# resolves each path against this contexts file and writes the xattr itself.
 # ---------------------------------------------------------------------------
-if command -v setfattr >/dev/null 2>&1; then
-    if find "$ROOT" -type f -exec setfattr -n security.selinux \
-            -v u:object_r:vendor_file:s0 {} + 2>/dev/null; then
-        log "applied vendor_file label to $(find "$ROOT" -type f | wc -l) files"
-    else
-        warn "could not set security.selinux on this runner; labels fall back to file_contexts at mount time"
+CTXFILE="$OUT/vendor_dlkm_file_contexts"
+cat > "$CTXFILE" <<'CTX'
+/lib(/.*)?    u:object_r:vendor_file:s0
+CTX
+
+if mkfs.erofs --help 2>&1 | grep -q 'file-contexts'; then
+    log "using mkfs.erofs --file-contexts for SELinux labels"
+    CTX_ARG=(--file-contexts="$CTXFILE")
+else
+    warn "mkfs.erofs has no --file-contexts; trying setfattr"
+    CTX_ARG=()
+    if command -v setfattr >/dev/null 2>&1; then
+        find "$ROOT" -type f -exec setfattr -n security.selinux \
+            -v u:object_r:vendor_file:s0 {} + 2>/dev/null \
+            || warn "setfattr failed too; the image will have no labels"
     fi
 fi
 
@@ -157,6 +172,7 @@ mkfs.erofs -z lz4hc,level=9 \
     -b "$BLOCK" -C "$CLUSTER" \
     -T "$TIMESTAMP" \
     --all-root \
+    "${CTX_ARG[@]}" \
     "$OUTIMG" "$ROOT" >/dev/null
 
 SIZE=$(stat -c %s "$OUTIMG")
@@ -169,3 +185,12 @@ truncate -s "$PARTITION_BYTES" "$OUTIMG"
 log "padded to partition size"
 
 dump.erofs -s "$OUTIMG" 2>/dev/null | sed 's/^/    /' || true
+
+# A host without SELinux enabled (the GitHub runner) silently produces an
+# image whose files carry no security.selinux xattr, which the device then
+# cannot label correctly. Refuse to ship such an image.
+if dump.erofs -s "$OUTIMG" 2>/dev/null | grep -q 'xattr_filter'; then
+    log "SELinux xattrs present in the image"
+else
+    die "image has no xattrs: --file-contexts did not take effect, do not flash this"
+fi
