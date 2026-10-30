@@ -3,6 +3,12 @@
 本文说明本仓库替 OnePlus 15（infiniti / SM8850）在 LineageOS 上补的那一层
 LTPO 支持：为什么需要、原厂是怎么做的、我们做了什么、怎么调、怎么验证、怎么回滚。
 
+> **实机结论（2026-10-30）**：刷入后背光分档已生效 —— 背光 ≥1160 → 1Hz，
+> 919~1159 → 30Hz，<919 → 不降频，跨时序切换保持。起作用的是 Infinity-X 那条
+> qsync + 背光表路径，本仓库额外加的 `adfr_auto_floor` 因此是冗余的（默认关闭，
+> 无害）。TE 真实测量在本面板不可用，详见 6.2 与
+> [test-report.md](test-report.md)。
+
 ---
 
 ## 1. 问题：LineageOS 上 LTPO 档位从不下发
@@ -227,27 +233,32 @@ dmesg | grep -E "auto floor|adfr-min-fps"
 cat /sys/kernel/oplus_display/min_fps        # 期望 1（或表值）
 ```
 
-### 6.2 面板真实刷新率（TE 测量）
+### 6.2 面板真实刷新率（TE 测量）—— 本面板不可用
 
-`test_te` 是驱动自带的**真实测量**：用面板 TE 的 GPIO 中断算间隔
-（`1000 / (now_ms - last_ms)`），且 **≤16Hz 时直接采用测量值**。
+> ⚠️ **2026-10-30 实机验证结论：此路不通，已推翻早期判断。**
 
-本仓库的 DTS 补丁已清掉 BIT14，所以 TE 中断在 probe 时就会注册。
+`test_te` 的设计确实是用 TE GPIO 的中断间隔算刷新率
+（`1000 / (now_ms - last_ms)`，≤16Hz 时直接用测量值），本仓库的 DTS 补丁也
+确实让中断在 probe 时注册成功（`/proc/interrupts` 里能看到 `TEST_TE_GPIO_0`）。
+
+**但这块面板是 OA fixed TE**（`oplus,adfr-oa-use-fixed-te`）：TE 信号被面板
+保持恒定频率，内部降频不反映在 TE 上。实测中断恒定 ~120 次/秒，与
+`min_fps` = 1 / 30 / 120 无关，因此 `test_te` 永远读不到真实的 1Hz。
+
+可用的替代观测手段见上表：`min_fps`（请求值）、`dmesg`（命令下发）、
+背光表分档（改亮度验证策略）、功耗（唯一能证明面板真的降频）。
+
+### 6.3 功耗对比（唯一可靠的"面板真的降了"证据）
+
+亮度保持不变，只切 ADFR 开关，对比电池电流均值：
 
 ```sh
-echo 1 > /sys/kernel/oplus_display/test_te
-cat /sys/kernel/oplus_display/test_te
-#   静止 30 秒后期望 1（1Hz）
-#   滑动时期望 120
-echo 0 > /sys/kernel/oplus_display/test_te
+echo 0x2e41 > /sys/kernel/oplus_display/adfr_config   # ADFR 开
+echo 0x0    > /sys/kernel/oplus_display/adfr_config   # ADFR 关（对照）
 ```
 
-已验证：`/proc/interrupts` 里应出现 `TEST_TE_GPIO_0` 这一行，计数随刷新变化。
-
-### 6.3 功耗对比（最硬的证据）
-
-静止亮屏、固定亮度，对比 `adfr_auto_floor` 0/1 的电池电流均值。参考值：120Hz 与
-1Hz 地板的差约 40~60 mA。
+拔线、静止亮屏，各采样 60 秒 `battery/current_now`。参考值：120Hz 与 1Hz
+地板的差约 40~60 mA。
 
 ---
 
