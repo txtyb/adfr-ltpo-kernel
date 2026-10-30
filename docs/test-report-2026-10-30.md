@@ -92,3 +92,59 @@ dmesg | grep -E "adfr-min-fps|min fps is|auto floor"
 # 检查 TE 中断
 grep TEST_TE /proc/interrupts
 ```
+
+---
+
+## 六、最终配置（2026-10-30 收尾）
+
+### 设备状态
+
+| 项 | 值 |
+|---|---|
+| vendor_dlkm | 原分区 + 新 `msm_drm.ko`（9,648,520） |
+| dtbo | ADFR 映射表 + 背光表 + `adfr-config=0x2e41` |
+| `peak_refresh_rate` | **165** |
+| `min_refresh_rate` | 0 |
+| 当前 mode | 120（桌面） |
+| 当前地板 | 1 Hz（背光 1520） |
+
+### 实际可达行为
+
+| 场景 | 表现 |
+|---|---|
+| 桌面 / Chrome / 设置 | 120 Hz |
+| QQ（请求 165 Exact） | 165 Hz |
+| 视频 24 / 30 / 60 fps | 精确匹配（120 整数分频） |
+| 静止 | 按背光表降到 1 / 30 Hz |
+| 165 mode 下的地板 | 最低 11 Hz（表尾） |
+
+### 发现：ARR 与 mode 的关系
+
+`qcom,dsi-qsync-mode-avr-step-fps` 让每个 mode 向 HWC 公告自己的**整数分频阶梯**：
+
+```
+120 mode: [120, 60, 40, 30, 24, 20, 15, 10, 5, 2, 1]
+165 mode: [165, 82.5, 55, 41.25, 33, 27.5, 23.57, ...]
+```
+
+因此出现非 mode 帧率（如 82.5）。案例：QQ 请求 165 Exact + `peak=120`
+→ 留在 165 mode → 阶梯里 ≤120 的最大档 → **82.5 Hz**（比直接 120 更差）。
+
+`peak=165` 时该问题消失（QQ 拿到 165）。`peak=120` 想要 QQ 跑 120 则需要
+从 144/165 时序删掉 AVR step（未实施）。
+
+### 已排除的控制手段
+
+| 手段 | 结论 |
+|---|---|
+| DCS 0x45 Get Scanline | 面板不实现（恒返回 0） |
+| `dynamic_float_te` | 打开后 TE 速率不变 |
+| `cmd game set --fps` | 仅对 `android:appCategory="game"` 生效 |
+| `device_config game_overlay` | 能写入，SF 不采纳 |
+| per-app mode / 上限 | 内核无权干预，需改 framework 或 LSPosed hook |
+
+### 建议
+
+- 想更省电：调低背光表的 1Hz 门槛（需重构建 dtbo）
+- per-app 控制只到"地板"这一层，不值得做
+- 重启一次可清除本次调试遗留的 `dynamic_float_te` 等临时状态
