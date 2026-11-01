@@ -314,3 +314,35 @@ Subject: [PATCH] display: oplus_adfr: kernel-side LTPO floor without qsync
  
  	if (h_skew != OPLUS_ADFR) {
  		ADFR_DEBUG("not in oa mode, should not set osync params\n");
+--- a/qcom/opensource/display-drivers/msm/sde/sde_encoder.c
++++ b/qcom/opensource/display-drivers/msm/sde/sde_encoder.c
+@@ -1441,15 +1441,26 @@
+ 	if ((avr_step_state != AVR_STEP_ENABLE) || !sde_conn->ops.get_avr_step_fps)
+ 		return 0;
+ 
+-	if (!qsync_mode && avr_step_state) {
+-		SDE_ERROR("invalid config: avr-step enabled without qsync\n");
+-		return -EINVAL;
++	if (!qsync_mode) {
++		/*
++		 * LineageOS never programs CONNECTOR_PROP_QSYNC_MODE (the OPPO ADFR
++		 * driver drops the write when the panel uses OA fixed TE), but the
++		 * composer still enables AVR step because the panel advertises
++		 * qcom,dsi-qsync-mode-avr-step-fps. Rejecting the commit here makes
++		 * SurfaceFlinger retry forever, which keeps the display busy and
++		 * stops the SoC from entering s2idle, so treat it as continuous
++		 * qsync exactly like the arp/video-psr path above.
++		 */
++		qsync_mode = SDE_RM_QSYNC_CONTINUOUS_MODE;
+ 	}
+ 
+ 	step_fps = sde_conn->ops.get_avr_step_fps(&sde_conn_state->base);
+ 
+ 	_sde_encoder_get_qsync_fps_callback(sde_conn_state->base.best_encoder, &min_fps,
+ 		&sde_conn_state->base, sde_conn);
++	/* without a qsync vote the property reads back as 0: use the nominal rate */
++	if (!min_fps)
++		min_fps = nom_fps;
+ 	if (!min_fps || !nom_fps || step_fps % nom_fps || step_fps % min_fps
+ 			|| step_fps < nom_fps || (vtotal * nom_fps) % step_fps) {
+ 		SDE_ERROR("invalid avr_step rate! nom:%u min:%u step:%u vtotal:%u\n", nom_fps,
