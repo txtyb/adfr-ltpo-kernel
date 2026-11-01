@@ -3,11 +3,37 @@ Subject: [PATCH] display: oplus_adfr: kernel-side LTPO floor without qsync
 
  display: oplus_adfr: drive the SA floor from the backlight table alone
 
- LineageOS only turns qsync on while ARR is active, and ARR is exactly what
- keeps the SoC out of s2idle on this device (see the panel patch). Gate the
- floor on the panel's backlight table instead of on qsync so the two features
- no longer have to be enabled together.
+ Port the Project Infinity-X ADFR floor handling and add a kernel-side
+ replacement for the OnePlus userspace service that LineageOS does not ship.
 
+ * oplus_adfr_get_sa_floor(): pick the SA min fps floor from the panel
+   backlight table (oplus,adfr-sa-min-fps-bl-table), falling back to
+   qsync_min_fps.
+ * oplus_adfr_sa_floor_update(): drive that floor whenever the panel declares
+   a backlight table instead of waiting for qsync. LineageOS only enables
+   qsync while ARR is active, and ARR is what keeps the SoC out of s2idle.
+ * oplus_adfr.h: add the backlight table and qsync_mode members the code uses.
+
+--- a/qcom/opensource/display-drivers/oplus/SM8850/oplus_adfr.h
++++ b/qcom/opensource/display-drivers/oplus/SM8850/oplus_adfr.h
+@@ -126,6 +126,9 @@
+ 	bool need_filter_auto_on_cmd;					/* indicates whether auto on cmds need to be filtered if auto off cmds have been sent within one frame or not */
+ 	unsigned int sa_min_fps;						/* the minimum self-refresh rate when no image would be sent to ddic in sa mode */
+ 	bool sa_min_fps_updated;						/* indicates whether sa min fps is updated or not */
++	unsigned int qsync_mode;						/* the latest qsync mode requested by sde */
++	unsigned int *sa_min_fps_bl_table;				/* backlight threshold and sa min fps pairs, highest threshold first */
++	unsigned int sa_min_fps_bl_table_count;			/* the number of pairs in sa_min_fps_bl_table */
+ 	bool skip_min_fps_setting;						/* indicates whether min fps setting should be skipped or not */
+ 	unsigned int sw_fps;							/* software vsync value */
+ 	struct pinctrl_state *te1_active;				/* a pinctrl state used to control te1 active */
+@@ -216,6 +219,7 @@
+ int oplus_adfr_update_display_id(void);
+ int oplus_adfr_init(void *dsi_panel);
+ bool oplus_adfr_is_supported(void *oplus_adfr_params);
++struct oplus_adfr_params *oplus_adfr_get_params(void *dsi_panel);
+ bool oplus_adfr_oa_bl_mutual_exclusion_is_enabled(void *oplus_adfr_params);
+ 
+ /* -------------------- standard adfr -------------------- */
 --- a/qcom/opensource/display-drivers/oplus/SM8850/oplus_adfr.c
 +++ b/qcom/opensource/display-drivers/oplus/SM8850/oplus_adfr.c
 @@ -8,6 +8,9 @@
